@@ -131,6 +131,7 @@ label.l{display:block;font-size:10.5px;font-weight:600;letter-spacing:1.8px;text
 .st.sit{fill:var(--line);fill-opacity:.9}.st.stand{fill:var(--text);fill-opacity:.85}
 .rl{fill:var(--mute);font:9.5px var(--f-body);text-anchor:middle}.rl.chg{fill:var(--text);font-weight:700}.rl.man{fill:var(--accent);font-weight:700}
 .tag.man{color:var(--accent);border-color:var(--accent)}
+.tmk{stroke:var(--accent);stroke-width:2}.tlb{fill:var(--accent);font:700 9.5px var(--f-body)}
 .nl{fill:var(--accent);font:600 9.5px var(--f-body);text-anchor:middle}
 .ph{stroke:var(--text);stroke-width:2}
 .empty{fill:var(--mute);font:14px var(--f-serif);font-style:italic;text-anchor:middle}
@@ -638,6 +639,7 @@ function normSong(s) {
   if (s.trimOut - s.trimIn < 2) { s.trimIn = 0; s.trimOut = s.dur; }
   s.overlap = +s.overlap || 0; s.vol = s.vol == null ? 1 : +s.vol; s.rate = clamp(+s.rate || 1, 0.7, 1.3);
   s.mix = Object.assign({ mode: 'fade', curve: 'cross', hold: 0, inSoft: true, outSoft: true }, s.mix || {});
+  s.tempo = Array.isArray(s.tempo) ? s.tempo.filter(e => e && isFinite(e.t) && e.rel > 0) : [];
   return s;
 }
 
@@ -650,7 +652,7 @@ function autoMult(bpm) {
 const rateOf = s => s.rate || 1;
 const effBpm = s => Math.round(s.bpm * rateOf(s) * 10) / 10;
 const songMult = s => s.mult ?? autoMult(effBpm(s));
-const rpmOf = (s, p) => Math.round(effBpm(s) * ((p && p.mult) ?? songMult(s)));
+const rpmOf = (s, p) => Math.round((p ? bpmAt(s, p.t) : effBpm(s)) * ((p && p.mult) ?? songMult(s)));
 // Factores para multiplicar el BPM (cadencia = BPM × factor)
 const FACTORS = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2];
 const FRAC = { 0.25: '¼', 0.5: '½', 0.75: '¾', 1: '1', 1.25: '1¼', 1.5: '1½', 2: '2', 3: '3' };
@@ -664,6 +666,30 @@ const zoneOf = v => clamp(Math.ceil(v / 2 - 1e-6), 1, 5);
 const zoneHTML = v => { const z = ZONES[zoneOf(v) - 1]; return `<span class="zchip z${zoneOf(v)}">${z[0]}</span> ${z[1]} · ${z[2]} FCmáx`; };
 const phraseSec = s => s.M * 60 / s.bpm;
 const phraseCls = s => phraseSec(s) / rateOf(s);
+// Cambios de velocidad dentro de la canción: s.tempo = [{ t: tiempo de la canción, rel: factor sobre la velocidad de la canción }]
+function tempoSegs(s) {
+  const base = rateOf(s), a = s.trimIn || 0, b = s.trimOut ?? s.dur;
+  const segs = [{ t: a, r: base }];
+  for (const e of (s.tempo || []).slice().sort((x, y) => x.t - y.t)) {
+    const r = clamp(base * e.rel, 0.5, 1.6);
+    if (e.t <= a + 0.01) segs[0].r = r; else if (e.t < b) segs.push({ t: e.t, r });
+  }
+  return segs;
+}
+function songToLocal(s, t) {
+  const sg = tempoSegs(s); if (t <= sg[0].t) return (t - sg[0].t) / sg[0].r;
+  let x = 0;
+  for (let i = 0; i < sg.length; i++) { const t0 = sg[i].t, t1 = i + 1 < sg.length ? sg[i + 1].t : Infinity; if (t <= t0) break; x += (Math.min(t, t1) - t0) / sg[i].r; }
+  return x;
+}
+function localToSong(s, x) {
+  const sg = tempoSegs(s); if (x <= 0) return sg[0].t + x * sg[0].r;
+  for (let i = 0; i < sg.length; i++) { const t0 = sg[i].t, t1 = i + 1 < sg.length ? sg[i + 1].t : Infinity, d = (t1 - t0) / sg[i].r; if (x <= d) return t0 + x * sg[i].r; x -= d; }
+  return sg[0].t;
+}
+function rateAt(s, t) { const sg = tempoSegs(s); let r = sg[0].r; for (const g of sg) if (g.t <= t + 1e-6) r = g.r; return r; }
+const bpmAt = (s, t) => Math.round(s.bpm * rateAt(s, t) * 10) / 10;
+const tempoEntry = (s, t) => (s.tempo || []).find(e => Math.abs(e.t - t) < 0.05);
 // Velocidad para que una canción suene a 'target' BPM (elige ×½ o ×2 si queda más cerca del 100 %)
 function rateFor(s, target) { let best = 1, bd = Infinity; for (const m of [1, 0.5, 2]) { const r = target * m / s.bpm, d = Math.abs(Math.log(r)); if (d < bd) { bd = d; best = r; } } return best; }
 
@@ -683,7 +709,7 @@ function snapT(s, t, mode) {
 function timeline(c) {
   const st = [], len = [], ov = []; let acc = 0;
   (c ? c.songs : []).forEach((s, i) => {
-    const L = Math.max(0.5, ((s.trimOut ?? s.dur) - (s.trimIn || 0)) / rateOf(s)); len.push(L);
+    const L = Math.max(0.5, songToLocal(s, s.trimOut ?? s.dur)); len.push(L);
     let o = 0;
     if (i > 0) { o = clamp(s.overlap || 0, 0, Math.max(0, Math.min(len[i - 1], L) - 0.5)); acc -= o; }
     ov.push(o); st.push(acc); acc += L;
@@ -725,10 +751,12 @@ function regenPoints(s, a, b) {
 }
 function regenAll(c) {
   c = c || cls(); const tl = timeline(c);
-  c.songs.forEach((s, i) => { if (!s.dur) { s.points = []; return; } const a = s.trimIn + (tl.own[i] - tl.st[i]) * rateOf(s), b = i + 1 < c.songs.length ? s.trimIn + (tl.own[i + 1] - tl.st[i]) * rateOf(s) : s.trimOut; regenPoints(s, a, b); });
+  c.songs.forEach((s, i) => { if (!s.dur) { s.points = []; return; } const a = localToSong(s, tl.own[i] - tl.st[i]), b = i + 1 < c.songs.length ? localToSong(s, tl.own[i + 1] - tl.st[i]) : s.trimOut; regenPoints(s, a, b);
+    const sp = phraseSec(s); for (const e of s.tempo || []) { let best = null; for (const q of s.points) if (best == null || Math.abs(q.t - e.t) < Math.abs(best - e.t)) best = q.t; if (best != null && Math.abs(best - e.t) < sp * 0.5) e.t = best; }
+  });
 }
 const totalDur = c => timeline(c).total;
-function flat(c) { const tl = timeline(c), out = []; c.songs.forEach((s, si) => s.points.forEach((p, pi) => out.push({ si, pi, s, p, T: tl.st[si] + (p.t - s.trimIn) / rateOf(s) }))); return out; }
+function flat(c) { const tl = timeline(c), out = []; c.songs.forEach((s, si) => s.points.forEach((p, pi) => out.push({ si, pi, s, p, T: tl.st[si] + songToLocal(s, p.t) }))); return out; }
 
 // ===== Decodificar y analizar =====
 const OAC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
@@ -908,7 +936,7 @@ function frame(sync) {
   // Corrige el reloj con la canción que manda (evita desfases)
   const li = ownerIdx(tl, T), ls = c.songs[li], le = ls && P.els.get(ls.id);
   if (le && !le.el.paused && le.el.readyState >= 2 && le.started && now - le.started > 0.6) {
-    const Tel = tl.st[li] + (le.el.currentTime - ls.trimIn) / rateOf(ls);
+    const Tel = tl.st[li] + songToLocal(ls, le.el.currentTime);
     if (Math.abs(Tel - T) > 0.08 && Math.abs(Tel - T) < 2) { P.anchor = { t: now, T: Tel }; T = Tel; }
   }
   if (T >= tl.total) { pausePlayback(); P.curT = 0; updatePlayhead(); renderNow(true); toast('Fin de la clase'); return; }
@@ -919,7 +947,7 @@ function frame(sync) {
     const e = inWin ? elFor(s) : P.els.get(s.id); if (!e) return;
     e.want = inWin;
     if (inWin) {
-      const rt = rateOf(s), exp = s.trimIn + Math.max(0, T - a) * rt, g = gainAt(c, tl, j, T);
+      const exp = localToSong(s, Math.max(0, T - a)), rt = rateAt(s, e.el.paused ? exp : e.el.currentTime), g = gainAt(c, tl, j, T);
       if (Math.abs(e.el.playbackRate - rt) > 1e-4) { e.el.defaultPlaybackRate = rt; e.el.playbackRate = rt; }
       if (e.el.paused || !e.started) {
         try { e.el.currentTime = exp; } catch (_) { }
@@ -935,7 +963,7 @@ function frame(sync) {
   // Metrónomo según la canción que marca el bloque
   const i = curIdx(T), f = G.F[i];
   if (f) {
-    const s = f.s, bt = 60 / s.bpm, stt = f.p.t + (T - f.T) * rateOf(s), k = Math.floor((stt - s.offset) / bt + 0.03), key = f.si + ':' + k;
+    const s = f.s, bt = 60 / s.bpm, stt = localToSong(s, T - tl.st[f.si]), k = Math.floor((stt - s.offset) / bt + 0.03), key = f.si + ':' + k;
     if (key !== P.lastBeat && k >= 0) {
       const first = P.lastBeat === ''; P.lastBeat = key;
       if (!first) {
@@ -1004,6 +1032,7 @@ function renderGraph() {
     const r = rpmOf(f.s, f.p), pr = i ? rpmOf(F[i - 1].s, F[i - 1].p) : r;
     if (x1 - x0 >= 24 || r !== pr) h += `<text x="${((x0 + x1) / 2).toFixed(1)}" y="${G.bot + 37}" class="rl${f.p.mult != null ? ' man' : ''}${r !== pr ? ' chg' : ''}">${r}</text>`;
   });
+  F.forEach(f => { if (tempoEntry(f.s, f.p.t)) { const x = xOf(f.T); h += `<line x1="${x}" x2="${x}" y1="${G.top - 12}" y2="${G.top}" class="tmk"/><text x="${(x + 3).toFixed(1)}" y="${G.top - 4}" class="tlb">${bpmAt(f.s, f.p.t)} BPM</text>`; } });
   const sf = selF();
   if (sf) { const x = xOf(sf.T); h += `<line x1="${x}" x2="${x}" y1="${G.top - 8}" y2="${G.bot + 22}" class="selv"/><circle cx="${x}" cy="${yOf(sf.p.inten)}" r="11.5" class="selr"/>`; }
   F.forEach(f => {
@@ -1077,14 +1106,14 @@ function renderNow(force) {
   const c = cls(), el = $('#now');
   if (!c.songs.length || !G.F.length) { el.innerHTML = '<span class="mute">Añade canciones y pulsa ▶ para ensayar la clase.</span>'; $('#beatTxt').textContent = ''; return; }
   const T = P.curT, i = curIdx(T), f = G.F[i]; if (!f) return;
-  const s = f.s, b = 60 / s.bpm, stt = f.p.t + (T - f.T) * rateOf(s);
+  const s = f.s, b = 60 / s.bpm, stt = localToSong(s, T - timeline(c).st[f.si]);
   const k = Math.floor((stt - s.offset) / b + 0.03);
   const inPhrase = (((k - s.phase) % s.M) + s.M) % s.M + 1;
   const key = i + '|' + k + '|' + P.playing;
   if (!force && key === P.nowKey) return; P.nowKey = key;
   const n = G.F[i + 1], rpm = rpmOf(s, f.p);
   let next;
-  if (n) { const left = Math.max(0, Math.ceil((n.T - T) / (60 / effBpm(n.s)) - 0.03)); next = `Cambio en <b class="mono">${left}</b> tiempos → <b>${posShort(n.p.pos)}</b> · ${rpmOf(n.s, n.p)} rpm · int ${n.p.inten}${n.p.note ? ' · ' + esc(n.p.note) : ''}${n.si !== f.si ? ' · <b>nueva canción</b>' : ''}`; }
+  if (n) { const left = Math.max(0, Math.ceil((n.T - T) / (60 / (s.bpm * rateAt(s, stt))) - 0.03)); next = `Cambio en <b class="mono">${left}</b> tiempos → <b>${posShort(n.p.pos)}</b> · ${rpmOf(n.s, n.p)} rpm · int ${n.p.inten}${n.p.note ? ' · ' + esc(n.p.note) : ''}${n.si !== f.si ? ' · <b>nueva canción</b>' : ''}`; }
   else next = 'Último bloque de la clase';
   el.innerHTML = `<div class="npos ${f.p.pos}">${f.p.pos === 'stand' ? '▲ De pie' : '● Sentado'}</div>
     <div class="nbig"><b>${rpm}</b><span>RPM · ${terrain(rpm).toUpperCase()}</span></div>
@@ -1097,8 +1126,8 @@ function renderNow(force) {
 
 // ===== Editor de punto =====
 const CHIPS = ['Sprint', 'Saltos', 'Recuperación', 'Ataque', 'Contrarreloj', 'Carga', 'Respira'];
-function multBtns(s, cur, act) {
-  const eb = effBpm(s), base = act === 'pmult' ? songMult(s) : autoMult(eb);
+function multBtns(s, cur, act, bpm) {
+  const eb = bpm || effBpm(s), base = act === 'pmult' ? songMult(s) : autoMult(eb);
   const opts = [[null, `Auto · ×${fracLabel(base)}`]];
   for (const m of FACTORS) { const r = Math.round(eb * m); if (r >= 40 && r <= 140) opts.push([m, `×${fracLabel(m)} · ${r}`]); }
   if (cur != null && !FACTORS.includes(cur)) opts.push([cur, `×${fracLabel(cur)} · ${Math.round(eb * cur)}`]);
@@ -1110,7 +1139,7 @@ function renderEditor() {
   const s = f.s, p = f.p, rpm = rpmOf(s, p), idx = G.F.indexOf(f);
   el.innerHTML = `<div class="edhead">
       <button class="btn" data-e="prev" ${idx ? '' : 'disabled'}>‹</button>
-      <div><div class="edtitle">Punto ${idx + 1} de ${G.F.length} · <span class="mono">${fmt1(f.T)}</span></div><div class="mute small">${esc(s.name)} · ${p.start ? 'inicio de canción' : 'masterbeat'} · ${effBpm(s)} BPM${rateOf(s) !== 1 ? ' (' + pct(rateOf(s)) + ')' : ''}</div></div>
+      <div><div class="edtitle">Punto ${idx + 1} de ${G.F.length} · <span class="mono">${fmt1(f.T)}</span></div><div class="mute small">${esc(s.name)} · ${p.start ? 'inicio de canción' : 'masterbeat'} · ${bpmAt(s, p.t)} BPM${rateAt(s, p.t) !== 1 ? ' (' + pct(rateAt(s, p.t)) + ')' : ''}</div></div>
       <button class="btn" data-e="next" ${idx < G.F.length - 1 ? '' : 'disabled'}>›</button>
     </div>
     <div class="edgrid">
@@ -1118,9 +1147,15 @@ function renderEditor() {
         <div class="mute small" style="margin-top:6px">${posLabel(p.pos, rpm)}</div></div>
       <div><label class="l">Cadencia en este bloque · BPM × factor</label>
         <div class="rpmbig"><b>${rpm}</b> rpm <span class="tag">${terrain(rpm)}</span>${p.mult != null ? '<span class="tag man">Cambiada aquí</span>' : ''}</div>
-        <div class="small mute" style="margin-bottom:6px">${effBpm(s)} BPM × ${fracLabel(pointMult(s, p))} = ${rpm} rpm</div>
-        <div class="seg">${multBtns(s, p.mult, 'pmult')}</div>
+        <div class="small mute" style="margin-bottom:6px">${bpmAt(s, p.t)} BPM × ${fracLabel(pointMult(s, p))} = ${rpm} rpm</div>
+        <div class="seg">${multBtns(s, p.mult, 'pmult', bpmAt(s, p.t))}</div>
         <div class="row small" style="margin-top:7px"><span class="mute">Otro factor ×</span><input type="number" min="0.2" max="3" step="0.05" value="${pointMult(s, p)}" data-e="multIn" aria-label="Factor" style="width:80px;min-height:32px;padding:3px 8px"></div>
+      </div>
+      <div><label class="l">Velocidad de la música desde aquí</label>
+        <div class="rpmbig"><b>${bpmAt(s, p.t)}</b> BPM <span class="tag">${pct(rateAt(s, p.t))}</span>${tempoEntry(s, p.t) ? '<span class="tag man">Cambia aquí</span>' : ''}</div>
+        <div class="row">${[-4, -2, -1, 1, 2, 4].map(d => `<button class="btn sm" data-e="tempo" data-v="${d}">${d > 0 ? '+' : '−'}${Math.abs(d)} BPM</button>`).join('')}</div>
+        <div class="row" style="margin-top:6px">${tempoEntry(s, p.t) ? '<button class="btn sm" data-e="tempoDel">Quitar este cambio</button>' : ''}${rateAt(s, p.t) !== rateOf(s) ? `<button class="btn sm" data-e="tempoBase">Volver a ${effBpm(s)} BPM</button>` : ''}</div>
+        <div class="small mute" style="margin-top:6px">Se mantiene hasta el siguiente cambio. El tono no cambia.</div>
       </div>
       <div><label class="l">Intensidad</label><div class="row"><button class="btn" data-e="int" data-v="-0.5">−</button><b class="mono intv" id="edInt">${p.inten}</b><button class="btn" data-e="int" data-v="0.5">+</button><input type="range" min="1" max="10" step="0.5" value="${p.inten}" data-e="intr" style="flex:1;min-width:100px"></div>
         <div class="small" style="margin-top:6px" id="edZone">${zoneHTML(p.inten)}</div></div>
@@ -1146,6 +1181,15 @@ $('#editor').addEventListener('click', e => {
   else if (a === 'int') { f.p.inten = clamp(f.p.inten + (+v), 1, 10); afterEdit(false); }
   else if (a === 'chip') { f.p.note = v; afterEdit(true); }
   else if (a === 'playhere') playFrom(Math.max(0, f.T - 0.05));
+  else if (a === 'tempo' || a === 'tempoBase' || a === 'tempoDel') {
+    const s = f.s, t = f.p.t, bpmNow = bpmAt(s, t);
+    s.tempo = (s.tempo || []).filter(e => Math.abs(e.t - t) >= 0.05);
+    if (a !== 'tempoDel') {
+      const r = a === 'tempoBase' ? rateOf(s) : clamp((bpmNow + (+v)) / s.bpm, 0.7, 1.3);
+      if (Math.abs(r - rateAt(s, t)) > 1e-4) s.tempo.push({ t, rel: Math.round(r / rateOf(s) * 10000) / 10000 });
+    }
+    stopPlayback(); regenAll(); afterEdit(true);
+  }
   else if (a === 'applyRest') { f.s.points.forEach((p, j) => { if (j > f.pi) { p.pos = f.p.pos; p.mult = f.p.mult; } }); afterEdit(true); toast('Aplicado al resto de la canción'); }
 });
 $('#editor').addEventListener('change', e => { if (e.target.dataset.e === 'multIn') renderEditor(); });
@@ -1171,11 +1215,11 @@ function waveSVG(s) {
   h += `<line class="wph" x1="-10" x2="-10" y1="0" y2="${H}" vector-effect="non-scaling-stroke"/>`;
   return `<svg class="wsvg" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">${h}</svg>`;
 }
-function trimLabel(s) { return `Entrada <b class="mono">${fmt1(s.trimIn)}</b> · Salida <b class="mono">${fmt1(s.trimOut)}</b> · Dura <b class="mono">${fmt((s.trimOut - s.trimIn) / rateOf(s))}</b>${rateOf(s) !== 1 ? ' (a ' + pct(rateOf(s)) + ')' : ''}`; }
+function trimLabel(s) { return `Entrada <b class="mono">${fmt1(s.trimIn)}</b> · Salida <b class="mono">${fmt1(s.trimOut)}</b> · Dura <b class="mono">${fmt(songToLocal(s, s.trimOut))}</b>${rateOf(s) !== 1 ? ' (a ' + pct(rateOf(s)) + ')' : ''}`; }
 function transHTML(c, i, tl) {
   const a = c.songs[i - 1], s = c.songs[i], ov = tl.ov[i], mx = maxOverlap(c, i);
   const ph = Math.round(phraseCls(a) * 10) / 10;
-  const ea = effBpm(a), es = effBpm(s), rel = Math.min(...[1, 0.5, 2].map(m => Math.abs(es - ea * m)));
+  const ea = bpmAt(a, a.trimOut - 0.01), es = bpmAt(s, s.trimIn), rel = Math.min(...[1, 0.5, 2].map(m => Math.abs(es - ea * m)));
   const warn = rel > 0.6 ? `<div class="small" style="color:var(--warn);margin-top:6px">BPM distintos (${ea} → ${es}): en mezclas largas los golpes se desfasan. Pulsa <b style="font:inherit;color:inherit">Igualar BPM</b> para que la canción que entra vaya al mismo ritmo.</div>` : `<div class="small mute" style="margin-top:6px">Mismo ritmo (${ea} → ${es} BPM) ✓</div>`;
   return `<div class="trans" data-i="${i}">
     <div class="row between"><b>Mezcla ${i} → ${i + 1}</b><span class="mono small" data-lbl="ov">${ov ? 'Se solapan ' + ov.toFixed(1) + ' s' : 'Corte seco'}</span></div>
@@ -1249,7 +1293,7 @@ function updateWavePlayheads() {
   document.querySelectorAll('.wave').forEach(w => {
     const i = +w.dataset.i, s = c.songs[i], ln = w.querySelector('.wph'); if (!s || !ln) return;
     const loc = T - tl.st[i];
-    const x = P.playing && loc >= 0 && loc < tl.len[i] ? (s.trimIn + loc * rateOf(s)) / s.dur * 1000 : -10;
+    const x = P.playing && loc >= 0 && loc < tl.len[i] ? localToSong(s, loc) / s.dur * 1000 : -10;
     ln.setAttribute('x1', x); ln.setAttribute('x2', x);
   });
 }
@@ -1270,13 +1314,13 @@ $('#songs').addEventListener('click', e => {
     if (tb.dataset.t === 'set') { s.overlap = clamp(+tb.dataset.v, 0, mx); stopPlayback(); timelineChanged(); }
     else if (tb.dataset.t === 'align') {
       const mIn = masterTimes(s).find(t => t >= s.trimIn - 0.05 && t < s.trimIn + 40);
-      const lead = mIn != null ? (mIn - s.trimIn) / rateOf(s) : 0;
+      const lead = mIn != null ? songToLocal(s, mIn) : 0;
       const endPrev = tl.st[i - 1] + tl.len[i - 1];
       const want = s.overlap > 0 ? s.overlap : phraseCls(a);
       let best = null;
       for (const t of masterTimes(a)) {
         if (t < a.trimIn || t > a.trimOut) continue;
-        const C = tl.st[i - 1] + (t - a.trimIn) / rateOf(a), ov = endPrev + lead - C;
+        const C = tl.st[i - 1] + songToLocal(a, t), ov = endPrev + lead - C;
         if (ov >= 0 && ov <= mx && (best == null || Math.abs(ov - want) < Math.abs(best - want))) best = ov;
       }
       if (best == null) { toast('No encuentro un masterbeat donde cuadrar; prueba a recortar la salida'); return; }
@@ -1290,9 +1334,9 @@ $('#songs').addEventListener('click', e => {
       stopPlayback(); timelineChanged();
     }
     else if (tb.dataset.t === 'match') {
-      const r = rateFor(s, effBpm(a));
+      const rel0 = rateAt(s, s.trimIn) / rateOf(s), r = rateFor(s, bpmAt(a, a.trimOut - 0.01)) / rel0;
       if (r < 0.7 || r > 1.3) { toast('La diferencia de BPM es demasiado grande para igualarla bien'); return; }
-      s.rate = Math.round(r * 10000) / 10000; stopPlayback(); timelineChanged(); toast(`Canción ${i + 1} al ${pct(s.rate)} → ${effBpm(s)} BPM`);
+      s.rate = Math.round(r * 10000) / 10000; stopPlayback(); timelineChanged(); toast(`Canción ${i + 1} entra a ${bpmAt(s, s.trimIn)} BPM`);
     }
     return;
   }
@@ -1401,13 +1445,13 @@ function renderSheet() {
   const c = cls();
   if (!c.songs.length) { $('#sheet').innerHTML = '<p class="mute">Añade canciones para generar la hoja.</p>'; return; }
   const F = G.F;
-  $('#sheet').innerHTML = c.songs.map((s, i) => `<h3>${i + 1}. ${esc(s.name)} <span class="mute mono small">${effBpm(s)} BPM${rateOf(s) !== 1 ? ' (' + pct(rateOf(s)) + ')' : ''} · ${fmt((s.trimOut - s.trimIn) / rateOf(s))}${s.overlap > 0 && i ? ' · mezcla ' + s.overlap.toFixed(1) + ' s' : ''}</span></h3><div style="overflow-x:auto"><table><tr><th>Tiempo</th><th>Bloque</th><th>RPM</th><th>Int.</th><th>Zona</th><th>Nota</th></tr>${F.filter(f => f.si === i).map(f => { const r = rpmOf(s, f.p); return `<tr><td class="mono">${fmt(f.T)}</td><td><span class="pill ${f.p.pos}">${posLabel(f.p.pos, r)}</span></td><td class="mono">${r} <span class="mute">×${fracLabel(pointMult(s, f.p))}</span></td><td class="mono">${f.p.inten}</td><td><span class="zchip z${zoneOf(f.p.inten)}">${ZONES[zoneOf(f.p.inten) - 1][0]}</span></td><td>${esc(f.p.note)}</td></tr>`; }).join('')}</table></div>`).join('');
+  $('#sheet').innerHTML = c.songs.map((s, i) => `<h3>${i + 1}. ${esc(s.name)} <span class="mute mono small">${effBpm(s)} BPM${rateOf(s) !== 1 ? ' (' + pct(rateOf(s)) + ')' : ''} · ${fmt(songToLocal(s, s.trimOut))}${s.overlap > 0 && i ? ' · mezcla ' + s.overlap.toFixed(1) + ' s' : ''}</span></h3><div style="overflow-x:auto"><table><tr><th>Tiempo</th><th>Bloque</th><th>RPM</th><th>Int.</th><th>Zona</th><th>Nota</th></tr>${F.filter(f => f.si === i).map(f => { const r = rpmOf(s, f.p); return `<tr><td class="mono">${fmt(f.T)}</td><td><span class="pill ${f.p.pos}">${posLabel(f.p.pos, r)}</span></td><td class="mono">${r} <span class="mute">×${fracLabel(pointMult(s, f.p))}${bpmAt(s, f.p.t) !== effBpm(s) ? ' · ' + bpmAt(s, f.p.t) + ' BPM' : ''}</span></td><td class="mono">${f.p.inten}</td><td><span class="zchip z${zoneOf(f.p.inten)}">${ZONES[zoneOf(f.p.inten) - 1][0]}</span></td><td>${esc(f.p.note)}</td></tr>`; }).join('')}</table></div>`).join('');
 }
 function sheetText() {
   const c = cls(); let out = `${c.name.toUpperCase()} · ${fmt(totalDur(c))}\n`;
   c.songs.forEach((s, i) => {
-    out += `\n${i + 1}. ${s.name} — ${effBpm(s)} BPM (${fmt((s.trimOut - s.trimIn) / rateOf(s))})${s.overlap > 0 && i ? ' · mezcla ' + s.overlap.toFixed(1) + ' s' : ''}\n`;
-    G.F.filter(f => f.si === i).forEach(f => { const r = rpmOf(s, f.p); out += `  ${fmt(f.T).padStart(5)}  ${posLabel(f.p.pos, r).padEnd(16)} ${String(r).padStart(3)} rpm (×${fracLabel(pointMult(s, f.p))})  int ${f.p.inten} ${ZONES[zoneOf(f.p.inten) - 1][0]}${f.p.note ? '  · ' + f.p.note : ''}\n`; });
+    out += `\n${i + 1}. ${s.name} — ${effBpm(s)} BPM (${fmt(songToLocal(s, s.trimOut))})${s.overlap > 0 && i ? ' · mezcla ' + s.overlap.toFixed(1) + ' s' : ''}\n`;
+    G.F.filter(f => f.si === i).forEach(f => { const r = rpmOf(s, f.p); out += `  ${fmt(f.T).padStart(5)}  ${posLabel(f.p.pos, r).padEnd(16)} ${String(r).padStart(3)} rpm (×${fracLabel(pointMult(s, f.p))})${bpmAt(s, f.p.t) !== effBpm(s) ? ' ' + bpmAt(s, f.p.t) + ' BPM' : ''}  int ${f.p.inten} ${ZONES[zoneOf(f.p.inten) - 1][0]}${f.p.note ? '  · ' + f.p.note : ''}\n`; });
   });
   return out;
 }
@@ -1475,7 +1519,7 @@ $('#impBtn').addEventListener('click', () => openModal('Importar clase', '', 'Im
     const c = { id: uid(), name: String(d.name || 'Clase importada'), songs: d.songs.map(s => normSong({
       id: s.id && !used.has(s.id) ? s.id : uid(), name: String(s.name || 'Canción'), dur: +s.dur || 180, bpm: +s.bpm || 128, offset: +s.offset || 0, phase: +s.phase || 0,
       M: [8, 16, 32].includes(+s.M) ? +s.M : 32, mult: s.mult ?? null, energy: Array.isArray(s.energy) ? s.energy : null, eBpm: s.eBpm, eOff: s.eOff,
-      wave: Array.isArray(s.wave) ? s.wave : null, trimIn: s.trimIn, trimOut: s.trimOut, overlap: s.overlap, vol: s.vol, rate: s.rate, mix: s.mix,
+      wave: Array.isArray(s.wave) ? s.wave : null, trimIn: s.trimIn, trimOut: s.trimOut, overlap: s.overlap, vol: s.vol, rate: s.rate, mix: s.mix, tempo: s.tempo,
       points: Array.isArray(s.points) ? s.points.map(p => ({ t: +p.t || 0, start: !!p.start, pos: p.pos === 'stand' ? 'stand' : 'sit', mult: p.mult ?? null, inten: clamp(+p.inten || 5, 1, 10), note: String(p.note || '') })) : []
     })) };
     stopPlayback(); state.classes.push(c); state.currentId = c.id; regenAll(c); sel = null; save(); renderAll();
